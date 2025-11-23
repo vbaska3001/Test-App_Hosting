@@ -9,7 +9,8 @@ const { User, Song } = require('./models');
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 const PORT = process.env.PORT || 3000;
 
@@ -194,6 +195,69 @@ app.get('/api/validated-covers', async (req, res) => {
     } catch (error) {
         console.error("Error getting validated covers:", error);
         res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// API: Sync (Batch Update from Scraper)
+app.post('/api/sync', async (req, res) => {
+    const { songs } = req.body;
+    if (!songs || !Array.isArray(songs)) {
+        return res.status(400).json({ error: "Invalid data format. 'songs' array required." });
+    }
+
+    try {
+        let upsertedCount = 0;
+        let insertedCount = 0;
+
+        // Get all users for round-robin assignment if needed
+        const users = await User.find({});
+        const userNames = users.map(u => u.name);
+        const buckets = [...userNames, 'others'];
+
+        for (const songData of songs) {
+            // Check if song exists
+            let song = await Song.findOne({ original_id: songData.original_id });
+
+            if (song) {
+                // Update existing song
+                // We merge candidate covers, avoiding duplicates by ID
+                const existingIds = new Set(song.candidate_covers.map(c => c.id));
+                const newCandidates = songData.candidate_covers.filter(c => !existingIds.has(c.id));
+
+                if (newCandidates.length > 0) {
+                    song.candidate_covers.push(...newCandidates);
+                    await song.save();
+                    upsertedCount++;
+                }
+            } else {
+                // Insert new song
+                // Assign user (simple random or round-robin logic for now)
+                // For better distribution, we could query counts, but random is okay for sync
+                const assignedUser = buckets[Math.floor(Math.random() * buckets.length)];
+
+                // Calculate a song_number (max + 1)
+                // This is expensive in loop, maybe just use timestamp or random for now if not critical
+                // Or let MongoDB handle ID. We used song_number for display.
+                // Let's just use 0 or handle it later if display needs it strictly sequential.
+
+                const newSong = new Song({
+                    ...songData,
+                    assigned_user: assignedUser,
+                    song_number: Date.now() // Temporary unique number
+                });
+                await newSong.save();
+                insertedCount++;
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `Sync complete. Inserted: ${insertedCount}, Updated: ${upsertedCount}`
+        });
+
+    } catch (error) {
+        console.error("Sync error:", error);
+        res.status(500).json({ error: "Internal server error during sync" });
     }
 });
 
