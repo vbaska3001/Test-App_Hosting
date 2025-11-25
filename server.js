@@ -198,6 +198,120 @@ app.get('/api/validated-covers', async (req, res) => {
     }
 });
 
+// Helper for analytics
+const calculateStats = (songs) => {
+    let total_originals = songs.length;
+    let originals_with_at_least_1_cover = 0;
+    let originals_with_3_covers = 0;
+    let originals_fully_rejected = 0;
+    let originals_pending = 0;
+    let total_covers_found = 0;
+    let total_votes = 0;
+
+    songs.forEach(song => {
+        const candidates = song.candidate_covers || [];
+
+        // Count confirmed covers
+        const confirmedCovers = candidates.filter(c => c.isCover === true).length;
+        if (confirmedCovers >= 1) originals_with_at_least_1_cover++;
+        if (confirmedCovers >= 3) originals_with_3_covers++;
+        total_covers_found += confirmedCovers;
+
+        // Count votes
+        candidates.forEach(c => {
+            total_votes += (c.is_cover_votes || 0) + (c.is_not_cover_votes || 0);
+        });
+
+        // Fully rejected: All candidates voted and all are NOT covers
+        // We need to check if all candidates have a decision (isCover !== undefined) and all are false
+        // And there must be at least one candidate
+        if (candidates.length > 0) {
+            const allDecided = candidates.every(c => c.isCover !== undefined);
+            const allRejected = candidates.every(c => c.isCover === false);
+            if (allDecided && allRejected) {
+                originals_fully_rejected++;
+            }
+        }
+
+        // Pending: No votes cast on any candidate
+        const noVotesCast = candidates.every(c => (c.is_cover_votes || 0) === 0 && (c.is_not_cover_votes || 0) === 0);
+        if (noVotesCast) {
+            originals_pending++;
+        }
+    });
+
+    return {
+        total_originals,
+        originals_with_at_least_1_cover,
+        originals_with_3_covers,
+        originals_fully_rejected,
+        originals_pending,
+        total_covers_found,
+        total_votes
+    };
+};
+
+// API: Global Analytics
+app.get('/api/analytics/global', async (req, res) => {
+    try {
+        const songs = await Song.find({});
+        const stats = calculateStats(songs);
+        res.json(stats);
+    } catch (error) {
+        console.error("Error getting global analytics:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// API: User Analytics
+app.get('/api/analytics/user/:name', async (req, res) => {
+    const { name } = req.params;
+    try {
+        // Find user to get exact name if needed, or just query by assigned_user
+        // Assuming name passed is the exact assigned_user string or we fuzzy match again?
+        // The frontend likely sends the exact name from login.
+
+        const songs = await Song.find({ assigned_user: name });
+        const stats = calculateStats(songs);
+
+        // Additional User Stats
+        stats.songs_assigned = songs.length;
+
+        // Find last vote
+        let lastVotedTime = new Date(0); // Epoch
+        let lastPair = null;
+
+        songs.forEach(song => {
+            if (song.candidate_covers) {
+                song.candidate_covers.forEach(c => {
+                    if (c.vote_timestamp) {
+                        const voteTime = new Date(c.vote_timestamp);
+                        if (voteTime > lastVotedTime) {
+                            lastVotedTime = voteTime;
+                            lastPair = {
+                                original_title: song.original_title,
+                                original_id: song.original_id,
+                                candidate_title: c.title,
+                                candidate_id: c.id,
+                                is_cover: c.isCover,
+                                vote_timestamp: c.vote_timestamp
+                            };
+                        }
+                    }
+                });
+            }
+        });
+
+        stats.last_voted = lastVotedTime.getTime() === 0 ? null : lastVotedTime;
+        stats.last_pair = lastPair;
+
+        res.json(stats);
+    } catch (error) {
+        console.error("Error getting user analytics:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
 // API: Sync (Batch Update from Scraper)
 app.post('/api/sync', async (req, res) => {
     const { songs } = req.body;
